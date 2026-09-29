@@ -1,5 +1,5 @@
-#include "kernels/gated_residual.h"
-#include "kernels/bf16.h"
+#include "kernels/cpu/gated_residual.h"
+#include "core/bf16.h"
 
 #include <cmath>
 #include <cstdio>

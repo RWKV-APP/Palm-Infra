@@ -1,6 +1,7 @@
-#include "kernels/attention.h"
-#include "kernels/threading.h"
-#include "engine/engine.h"  // for CacheMetadata, cache_meta, cache_data
+#include "kernels/cpu/attention.h"
+#include "core/fp16.h"
+#include "runtime/threading.h"
+#include "core/cache_layout.h"
 
 #include <algorithm>
 #include <chrono>
@@ -197,9 +198,7 @@ static BenchResult run_bench(const BenchConfig& cfg) {
     Tensor mask_t = Tensor::create(Precision::FP32, MemoryType::EXTERNAL,
                                     dst, src, 1, 1, mask);
 
-    OpParams p;
-    p.i32 = {2 /*kv_cache=2*/, cfg.causal ? 1 : 0, H, KV, hd, vd};
-    p.f32 = {scale};
+    SdpaParams p{2, cfg.causal ? 1 : 0, H, KV, hd, vd, scale};
 
     ThreadPool pool(cfg.num_threads);
 

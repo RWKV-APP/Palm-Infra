@@ -1,11 +1,9 @@
 #include "graph/execute.h"
-#include "engine/backend.h"
-#include "kernels/bf16.h"
-#include "kernels/matmul.h"
-#include "kernels/moe.h"
-#include "kernels/moe_ssd.h"
-#include "kernels/tensor.h"
-#include "kernels/trace.h"
+#include "runtime/backend.h"
+#include "core/bf16.h"
+#include "storage/ssd_expert_cache/cache.h"
+#include "core/tensor.h"
+#include "runtime/trace.h"
 #include <algorithm>
 #include <cassert>
 #include <chrono>
@@ -261,7 +259,9 @@ void execute_graph(ExecContext& ctx, int stop_after_node_index) {
         return;
     }
     ctx.backend->clear_dispatch_error();
-    matmul_reset_activation_cache();
+    ctx.backend->begin_execution();
+    if (ctx.moe_backend && ctx.moe_backend != ctx.backend)
+        ctx.moe_backend->begin_execution();
     // Device-resident backends (Metal) keep intermediates in device buffers,
     // so borrowed-view detection can't rely on host-pointer equality; classify
     // views by op type instead, and skip the host owner-id assertions.
@@ -354,8 +354,8 @@ void execute_graph(ExecContext& ctx, int stop_after_node_index) {
                 ctx.backend->free_output(t, pool);
             }
             t.data = nullptr;
-            t.device_data = nullptr;
-            t.device_offset = 0;
+            t.device.buffer = nullptr;
+            t.device.offset = 0;
             t.mem_type = MemoryType::NONE;
             t.owner_id = 0;
             t.storage_id = 0;
@@ -384,9 +384,9 @@ void execute_graph(ExecContext& ctx, int stop_after_node_index) {
                 schedule_moe_hash_cross_layer_prefetch(
                     tensors[moe_inputs[token_ids_input]],
                     tensors[moe_inputs[hash_table_input]],
-                    static_cast<const MoeSsdTensorSource*>(
+                    dynamic_cast<const MoeSsdTensorSource*>(
                         gate.moe_ssd_source),
-                    static_cast<const MoeSsdTensorSource*>(
+                    dynamic_cast<const MoeSsdTensorSource*>(
                         down.moe_ssd_source),
                     graph_params::get_i32(moe.params, 1, 0),
                     graph_params::get_i32(moe.params, 2, 0),
@@ -474,8 +474,8 @@ void execute_graph(ExecContext& ctx, int stop_after_node_index) {
                 out = src;
                 for (int d = 0; d < 4; ++d) out.shape[d] = shape[d];
                 out.compute_strides();
-                out.device_data = src.device_data;
-                out.device_offset = src.device_offset;
+                out.device.buffer = src.device.buffer;
+                out.device.offset = src.device.offset;
                 inline_zero_copy_view = true;
             } else if (node.op_type == OpType::PERMUTE) {
                 const int axis[4] = {
@@ -490,8 +490,8 @@ void execute_graph(ExecContext& ctx, int stop_after_node_index) {
                     view.stride[axis[d]] = src.stride[d];
                 }
                 out = view;
-                out.device_data = src.device_data;
-                out.device_offset = src.device_offset;
+                out.device.buffer = src.device.buffer;
+                out.device.offset = src.device.offset;
                 inline_zero_copy_view = true;
             } else if (node.op_type == OpType::SLICE) {
                 const int dim =
@@ -501,12 +501,12 @@ void execute_graph(ExecContext& ctx, int stop_after_node_index) {
                 const int size = graph_params::get_i32(
                     node.params, 2, (int)src.shape[dim]);
                 out = src;
-                out.device_data = src.device_data;
+                out.device.buffer = src.device.buffer;
                 const size_t byte_offset =
                     (size_t)offset * src.stride[dim];
                 if (src.data)
                     out.data = static_cast<uint8_t*>(src.data) + byte_offset;
-                out.device_offset = src.device_offset + byte_offset;
+                out.device.offset = src.device.offset + byte_offset;
                 out.shape[dim] = size;
                 inline_zero_copy_view = true;
             } else if (node.op_type == OpType::CONTIGUOUS &&
@@ -518,8 +518,8 @@ void execute_graph(ExecContext& ctx, int stop_after_node_index) {
                 out = src;
                 for (int d = 0; d < 4; ++d) out.shape[d] = shape[d];
                 out.compute_strides();
-                out.device_data = src.device_data;
-                out.device_offset = src.device_offset;
+                out.device.buffer = src.device.buffer;
+                out.device.offset = src.device.offset;
                 inline_zero_copy_view = true;
             }
         }
@@ -543,7 +543,7 @@ void execute_graph(ExecContext& ctx, int stop_after_node_index) {
                     // alloc_output() sets out.data/mem_type/owner_id/storage_id.
                     // Default (CPU) impl is the old host BufferPool path;
                     // a device backend allocates an MTLBuffer and records it in
-                    // out.device_data.
+                    // out.device.buffer.
                     void* buf = ctx.backend->alloc_output(out, nbytes, pool);
                     if (!buf) {
                         fprintf(stderr, "execute: pool acquire failed for node %u (%zu bytes)\n",
@@ -608,9 +608,9 @@ void execute_graph(ExecContext& ctx, int stop_after_node_index) {
                     schedule_moe_hash_cross_layer_prefetch(
                         tensors[next_inputs[token_ids_input]],
                         tensors[next_inputs[hash_table_input]],
-                        static_cast<const MoeSsdTensorSource*>(
+                        dynamic_cast<const MoeSsdTensorSource*>(
                             next_gate.moe_ssd_source),
-                        static_cast<const MoeSsdTensorSource*>(
+                        dynamic_cast<const MoeSsdTensorSource*>(
                             next_down.moe_ssd_source),
                         num_experts, top_k);
                 } else if (ctx.moe_cross_layer_prefetch) {
@@ -639,14 +639,14 @@ void execute_graph(ExecContext& ctx, int stop_after_node_index) {
                             return;
                         }
                         prediction_input.data = prediction_storage.data();
-                        prediction_input.device_data = nullptr;
-                        prediction_input.device_offset = 0;
+                        prediction_input.device.buffer = nullptr;
+                        prediction_input.device.offset = 0;
                     }
                     schedule_moe_cross_layer_prefetch(
                         prediction_input, next_router, next_bias,
-                        static_cast<const MoeSsdTensorSource*>(
+                        dynamic_cast<const MoeSsdTensorSource*>(
                             next_gate.moe_ssd_source),
-                        static_cast<const MoeSsdTensorSource*>(
+                        dynamic_cast<const MoeSsdTensorSource*>(
                             next_down.moe_ssd_source),
                         config);
                 }
@@ -793,8 +793,8 @@ void execute_graph(ExecContext& ctx, int stop_after_node_index) {
                     continue;
                 if (rel_borrowed[r]) {
                     t.data = nullptr;
-                    t.device_data = nullptr;
-                    t.device_offset = 0;
+                    t.device.buffer = nullptr;
+                    t.device.offset = 0;
                     t.mem_type = MemoryType::NONE;
                     t.owner_id = 0;
                     t.storage_id = 0;
@@ -812,8 +812,8 @@ void execute_graph(ExecContext& ctx, int stop_after_node_index) {
                 }
                 ctx.backend->free_output(t, pool);
                 t.data     = nullptr;
-                t.device_data = nullptr;
-                t.device_offset = 0;
+                t.device.buffer = nullptr;
+                t.device.offset = 0;
                 t.mem_type = MemoryType::NONE;
                 t.owner_id = 0;
                 t.storage_id = 0;

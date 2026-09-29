@@ -1,19 +1,12 @@
 #include "engine/engine.h"
-#include "engine/byte_ranges.h"
+#include "backends/factory.h"
+#include "storage/byte_ranges.h"
 #include "engine/weight_metadata.h"
 
-#include "kernels/matmul.h"
-#include "kernels/moe_ssd.h"
-#include "kernels/trace.h"
-#include "kernels/cpu_platform.h"
+#include "runtime/host_compute.h"
+#include "storage/ssd_expert_cache/cache.h"
+#include "runtime/trace.h"
 #include "platform/posix_compat.h"
-#ifdef MOLLM_METAL
-#include "engine/metal_backend.h"
-#endif
-#ifdef MOLLM_CUDA
-#include "engine/cuda_backend.h"
-#endif
-
 #include <algorithm>
 #include <cerrno>
 #include <cstdint>
@@ -93,6 +86,8 @@ void initialize_input_tensor(Tensor& tensor, const GraphNode& node) {
 volatile uint8_t g_package_warmup_sink = 0;
 
 }  // namespace
+
+LLMEngine::LLMEngine() : cpu_backend_(create_cpu_backend()) {}
 
 LLMEngine::~LLMEngine() {
     clear_model_state();
@@ -421,10 +416,10 @@ bool LLMEngine::load_graph(Graph& g, ExecContext& exec_ctx, const char* path) {
             t.compute_strides();
             t.data = data;
             t.rowmajor_data = data;
-            t.device_data = nullptr;
-            t.device_offset = 0;
-            t.scales_device_data = nullptr;
-            t.scales_device_offset = 0;
+            t.device.buffer = nullptr;
+            t.device.offset = 0;
+            t.device.scales_buffer = nullptr;
+            t.device.scales_offset = 0;
             t.mem_type = MemoryType::EXTERNAL;
             t.is_interleaved = false;
             t.is_q4_repacked = false;
@@ -436,8 +431,7 @@ bool LLMEngine::load_graph(Graph& g, ExecContext& exec_ctx, const char* path) {
             t.q4_repack_data = nullptr;
             t.q4_g32_data = nullptr;
             t.q4_g128_data = nullptr;
-            t.prepared_weight = nullptr;
-            t.prepared_weight_row_offset = 0;
+            t.prepared = {};
             // Prepare accelerator storage while t.data still points at the raw
             // package bytes. CPU load-time packing may replace t.data later.
             if (accelerator_backend_ &&
@@ -647,12 +641,12 @@ bool LLMEngine::load_graph(Graph& g, ExecContext& exec_ctx, const char* path) {
                 // their own prepared layouts. Avoid duplicating CPU sidecars
                 // unless the selected backend still needs reference fallback.
                 if (build_cpu_weight_sidecars) {
-                    prepare_matmul_weight(
+                    host_prepare_matmul_weight(
                         t, wref, data, packed_weights_, prepared_weights_,
                         !lookup_table,
                         native_fp8_weight_nodes.count(node.id) == 0);
                     if (native_fp8_weight_nodes.count(node.id) != 0)
-                        prepare_fp8_bf16_fp16_weight(
+                        host_prepare_fp8_bf16_fp16_weight(
                             t, wref, data, packed_weights_);
                 }
                 // Once a CPU sidecar owns every value needed by the selected
@@ -722,12 +716,12 @@ bool LLMEngine::load_graph(Graph& g, ExecContext& exec_ctx, const char* path) {
             node.params.str[0].find("vision_pos_embed.weights") !=
                 std::string::npos;
         if (build_cpu_weight_sidecars) {
-            prepare_matmul_weight(
+            host_prepare_matmul_weight(
                 t, wpath, t.data, packed_weights_, prepared_weights_,
                 !lookup_table,
                 native_fp8_weight_nodes.count(node.id) == 0);
             if (native_fp8_weight_nodes.count(node.id) != 0)
-                prepare_fp8_bf16_fp16_weight(
+                host_prepare_fp8_bf16_fp16_weight(
                     t, wpath, t.data, packed_weights_);
         }
         finalize_accelerator_weight();
@@ -853,7 +847,7 @@ bool LLMEngine::allocate_caches(Graph& g, ExecContext& exec_ctx,
         if (accelerator_backend_) {
             accelerator_backend_->alloc_persistent(
                 *t, total, host_access, host_prefix_bytes);
-            return t->data && t->device_data;
+            return t->data && t->device.buffer;
         }
         void* buf = persistent_pool_.acquire(total);
         t->data = buf;
@@ -1049,10 +1043,10 @@ bool LLMEngine::load_impl(const EngineConfig& cfg) {
         cfg_.moe_ssd_cross_layer_prefetch;
     exec_ctx_decode_.moe_hash_cross_layer_prefetch =
         exec_ctx_decode_.moe_cross_layer_prefetch;
-    exec_ctx_prefill_.backend = &cpu_backend_;
-    exec_ctx_decode_.backend = &cpu_backend_;
-    exec_ctx_vision_.backend = &cpu_backend_;
-    exec_ctx_mtp_.backend = &cpu_backend_;
+    exec_ctx_prefill_.backend = cpu_backend_.get();
+    exec_ctx_decode_.backend = cpu_backend_.get();
+    exec_ctx_vision_.backend = cpu_backend_.get();
+    exec_ctx_mtp_.backend = cpu_backend_.get();
     exec_ctx_prefill_.moe_backend = nullptr;
     exec_ctx_decode_.moe_backend = nullptr;
     exec_ctx_vision_.moe_backend = nullptr;
@@ -1072,9 +1066,13 @@ bool LLMEngine::load_impl(const EngineConfig& cfg) {
         return true;
     };
     if (cfg_.device == Device::METAL) {
-#ifdef MOLLM_METAL
-        accelerator_backend_ = std::make_unique<MetalBackend>();
-        if (!accelerator_backend_->available()) {
+        std::string factory_error;
+        accelerator_backend_ = create_accelerator_backend(
+            AcceleratorBackendKind::METAL, factory_error);
+        if (!accelerator_backend_) {
+            if (!fallback_to_cpu(factory_error.c_str()))
+                return false;
+        } else if (!accelerator_backend_->available()) {
             if (!fallback_to_cpu("Metal backend unavailable"))
                 return false;
         } else {
@@ -1086,18 +1084,18 @@ bool LLMEngine::load_impl(const EngineConfig& cfg) {
             // (including cross-layer prefetch) for token generation.
             exec_ctx_decode_.backend =
                 cfg_.moe_ssd_cache_bytes != 0 && !cfg_.metal_ssd_full
-                ? static_cast<Backend*>(&cpu_backend_)
+                ? cpu_backend_.get()
                 : accelerator_backend_.get();
             exec_ctx_mtp_.backend = exec_ctx_decode_.backend;
         }
-#else
-        if (!fallback_to_cpu("built without MOLLM_METAL"))
-            return false;
-#endif
     } else if (cfg_.device == Device::CUDA) {
-#ifdef MOLLM_CUDA
-        accelerator_backend_ = std::make_unique<CudaBackend>();
-        if (!accelerator_backend_->available()) {
+        std::string factory_error;
+        accelerator_backend_ = create_accelerator_backend(
+            AcceleratorBackendKind::CUDA, factory_error);
+        if (!accelerator_backend_) {
+            if (!fallback_to_cpu(factory_error.c_str()))
+                return false;
+        } else if (!accelerator_backend_->available()) {
             if (!fallback_to_cpu("CUDA backend unavailable"))
                 return false;
         } else {
@@ -1106,10 +1104,6 @@ bool LLMEngine::load_impl(const EngineConfig& cfg) {
             exec_ctx_mtp_.backend = accelerator_backend_.get();
             exec_ctx_vision_.backend = accelerator_backend_.get();
         }
-#else
-        if (!fallback_to_cpu("built without MOLLM_CUDA"))
-            return false;
-#endif
     }
     if (accelerator_backend_ &&
         !accelerator_backend_->set_operator_fallback_policy(
@@ -1195,10 +1189,10 @@ bool LLMEngine::load_impl(const EngineConfig& cfg) {
                         "--metal-ssd-full\n");
                 return false;
             }
-            exec_ctx_prefill_.backend = &cpu_backend_;
-            exec_ctx_decode_.backend = &cpu_backend_;
-            exec_ctx_vision_.backend = &cpu_backend_;
-            exec_ctx_mtp_.backend = &cpu_backend_;
+            exec_ctx_prefill_.backend = cpu_backend_.get();
+            exec_ctx_decode_.backend = cpu_backend_.get();
+            exec_ctx_vision_.backend = cpu_backend_.get();
+            exec_ctx_mtp_.backend = cpu_backend_.get();
             const bool metal_hybrid =
                 cfg_.device == Device::METAL &&
                 cfg_.moe_ssd_cache_bytes != 0;

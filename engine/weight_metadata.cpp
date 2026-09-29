@@ -1,7 +1,5 @@
 #include "engine/weight_metadata.h"
-#include "kernels/cpu_platform.h"
-
-#include "kernels/matmul.h"
+#include "runtime/host_compute.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -38,8 +36,7 @@ bool configure_weight_metadata(Tensor& tensor,
     tensor.is_fp8_block128 = false;
     tensor.q4_g32_data = nullptr;
     tensor.q4_g128_data = nullptr;
-    tensor.prepared_weight = nullptr;
-    tensor.prepared_weight_row_offset = 0;
+    tensor.prepared = {};
 
     const bool is_quantized =
         tensor.prec == Precision::INT8 || tensor.prec == Precision::INT4 ||
@@ -226,8 +223,8 @@ bool configure_weight_metadata(Tensor& tensor,
     // scalar provider decodes it directly, while the ARM provider retains its
     // historical requirement for the DOTPROD kernel.
     if ((int4_bg32_layout || int4_bg128_layout) &&
-        mollm::cpu::capabilities().arm_neon &&
-        !matmul_int4_q4dot_kernel_available()) {
+        host_arm_neon_available() &&
+        !host_packed_int4_supported()) {
         std::fprintf(stderr,
                      "Engine: INT4 packed weight %s requires an ARM DOTPROD "
                      "build\n",
@@ -254,7 +251,7 @@ bool configure_weight_metadata(Tensor& tensor,
                 return false;
             }
             expected_data_size = static_cast<uint64_t>(
-                pack_b_q4dot_g32_bytes(static_cast<int>(rows),
+                host_packed_int4_g32_bytes(static_cast<int>(rows),
                                        static_cast<int>(cols)));
         } else if (int4_bg128_layout) {
             if (rows > std::numeric_limits<int>::max() ||
@@ -266,7 +263,7 @@ bool configure_weight_metadata(Tensor& tensor,
                 return false;
             }
             expected_data_size = static_cast<uint64_t>(
-                pack_b_q4dot_g128_bytes(static_cast<int>(rows),
+                host_packed_int4_g128_bytes(static_cast<int>(rows),
                                         static_cast<int>(cols)));
         } else {
             const uint64_t packed_cols = 1 + (cols_u - 1) / 2;

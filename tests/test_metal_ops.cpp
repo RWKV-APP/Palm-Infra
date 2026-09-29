@@ -1,12 +1,15 @@
 // Per-op parity tests for the Metal backend vs the CPU reference kernels.
 // Only built when MOLLM_METAL is defined.
 
-#include "kernels/tensor.h"
-#include "kernels/matmul.h"
-#include "kernels/moe.h"
-#include "kernels/rwkv.h"
-#include "engine/metal_backend.h"
+#include "core/tensor.h"
+#include "core/fp16.h"
+#include "kernels/cpu/matmul/matmul.h"
+#include "kernels/cpu/moe/moe.h"
+#include "kernels/cpu/models/rwkv.h"
+#include "backends/metal/backend.h"
+#include "core/quant_layouts.h"
 #include "graph/graph.h"
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -88,7 +91,7 @@ int main() {
     MetalBackend mb;
     if (!mb.available()) {
         fprintf(stderr, "Metal not available; skipping\n");
-        return 0;  // not a failure on non-Metal CI
+        return 77;  // Report unavailable hardware as skipped, not passed.
     }
 
     // A duplicate release must not enqueue the same MTLBuffer twice. Otherwise
@@ -104,7 +107,7 @@ int main() {
         Tensor second = Tensor::create(Precision::FP32, MemoryType::NONE, 256);
         mb.alloc_output(first, first.nbytes(), nullptr);
         mb.alloc_output(second, second.nbytes(), nullptr);
-        CHECK(first.device_data != second.device_data,
+        CHECK(first.device.buffer != second.device.buffer,
               "Metal pool rejects duplicate release");
         mb.free_output(first, nullptr);
         mb.free_output(second, nullptr);
@@ -399,7 +402,7 @@ int main() {
         Tensor M=make_dev(mb,Precision::FP32,full,rows);
         Tensor G=M, U=M;
         G.shape[0]=I;
-        U.shape[0]=I; U.device_offset=(size_t)I*sizeof(float);
+        U.shape[0]=I; U.device.offset=(size_t)I*sizeof(float);
         Tensor O=make_dev(mb,Precision::FP32,I,rows);
         std::vector<float> merged(full*rows),ref(I*rows);
         fill_rand(merged.data(),merged.size());
@@ -518,7 +521,7 @@ int main() {
     run_shortconv(6144, 4, "SHORTCONV groups=6144 seq=4 (prod width)");
 
     // ---- GATED_DELTANET_DECODE (seq=1): GDN recurrence + RMSNormGated ----
-    // Scalar reference mirrors kernels/gdn_neon.h gdn_recurrence.
+    // Scalar reference mirrors kernels/cpu/arm/gdn_neon.h gdn_recurrence.
     {
         int H = 4, VH = 4, K = 128, Vd = 128;   // repeat=1
         float l2eps = 1e-6f, rmseps = 1e-6f, scale = 1.0f/std::sqrt((float)K);
@@ -669,7 +672,7 @@ int main() {
         Tensor B = AB;
         A.shape[0] = VH;
         B.shape[0] = VH;
-        B.device_offset += (size_t)VH * sizeof(float);
+        B.device.offset += (size_t)VH * sizeof(float);
         Tensor Z = make_dev(mb, Precision::FP32, zdim, S);          // [seq, zdim]
         Tensor ALG = make_dev(mb, Precision::FP32, VH, 1);
         Tensor DTB = make_dev(mb, Precision::FP32, VH, 1);
@@ -1166,8 +1169,7 @@ int main() {
                                     state_n, 1, 1, 1, ref_state.data());
         Tensor o_h = Tensor::create(Precision::FP32, MemoryType::EXTERNAL,
                                     hidden, seq, 1, 1, ref.data());
-        OpParams cpu_params;
-        cpu_params.i32 = {heads, head_size, seq, real};
+        Rwkv7Params cpu_params{heads, head_size, seq, real};
         kernel_rwkv7(cpu_params, {&r_h, &d_h, &k_h, &v_h, &a_h, &b_h, &s_h},
                      o_h, nullptr);
 
@@ -1215,7 +1217,7 @@ int main() {
         int full=96, off=32, hd=64, S=7, H=2, half=hd/2;
         Tensor PARENT=make_dev3(mb, Precision::FP32, full, S, H);
         Tensor IN=PARENT;
-        IN.shape[0]=hd; IN.device_offset=(size_t)off*sizeof(float);
+        IN.shape[0]=hd; IN.device.offset=(size_t)off*sizeof(float);
         Tensor X=make_dev3(mb, Precision::FP32, hd, S, H);
         Tensor COS=make_dev(mb, Precision::FP32, half, S);
         Tensor SIN=make_dev(mb, Precision::FP32, half, S);
@@ -1248,7 +1250,7 @@ int main() {
         Tensor P = SRC;
         P.shape[0]=b; P.shape[1]=a;
         P.stride[0]=SRC.stride[1]; P.stride[1]=SRC.stride[0];
-        P.device_data = SRC.device_data; P.device_offset = SRC.device_offset;
+        P.device.buffer = SRC.device.buffer; P.device.offset = SRC.device.offset;
         Tensor O = make_dev(mb, Precision::FP32, b, a);     // dense [b, a]
         metal_op(mb, OpType::CONTIGUOUS, {&P}, O);
         // ref: O[j + i*b]?  O is [b(inner), a]: O[i2*... ] row-major over shape.
@@ -1270,7 +1272,7 @@ int main() {
         Tensor P = SRC;                       // [d, s, h] view of [d,h,s]
         P.shape[0]=d; P.shape[1]=s; P.shape[2]=h;
         P.stride[0]=SRC.stride[0]; P.stride[1]=SRC.stride[2]; P.stride[2]=SRC.stride[1];
-        P.device_data = SRC.device_data; P.device_offset = SRC.device_offset;
+        P.device.buffer = SRC.device.buffer; P.device.offset = SRC.device.offset;
         Tensor O = make_dev3(mb, Precision::FP32, d, s, h);
         metal_op(mb, OpType::CONTIGUOUS, {&P}, O);
         // dense O index t -> (i0=d, i1=s, i2=h); source = SRC[i0, i2(h), i1(s)]
@@ -1425,7 +1427,7 @@ int main() {
     // ---- Default W8A16 prefill GEMM ----------------------------------------
     // Cover both cooperative output-tile specializations. The second shape
     // deliberately trips the large-projection M128 dispatch rule.
-    {
+    if (mb.has_tensor_path()) {
         // Initialize the diagnostic W8A8 switch before its first dispatch.
         // These cases use two identical scale groups, which intentionally
         // selects the production W8A16 path even while W8A8 is enabled.
@@ -1493,12 +1495,15 @@ int main() {
             CHECK(close((const float*)C.data, ref.data(), M*N,
                         1e-2f, 3e-2f), label);
         }
+    } else {
+        std::printf("  SKIP: W8A16 prefill GEMM requires the Metal 4 tensor "
+                    "path (M5/A19+ and compatible toolchain)\n");
     }
 
     // ---- W4A16 prefill GEMM (generic G32/G64 and specialized G128) -----------
     // Both variants use the decoded offset-binary [nibbles|scales] layout.
     // Keeping G64 here guards the non-specialized function-constant path.
-    {
+    if (mb.has_tensor_path()) {
         setenv("MOLLM_METAL_W4_PREFILL_MODE", "fast", 1);
         constexpr int M = 64;
         constexpr int K = 256;
@@ -1615,6 +1620,9 @@ int main() {
                 label);
         }
         unsetenv("MOLLM_METAL_W4_PREFILL_MODE");
+    } else {
+        std::printf("  SKIP: W4A16 prefill GEMM requires the Metal 4 tensor "
+                    "path (M5/A19+ and compatible toolchain)\n");
     }
 
     // ---- Small-M W4 projection: one weight scan for M=2..4 ----------------
@@ -1952,7 +1960,6 @@ int main() {
     // registered weight region so wrap_weight's decode path is exercised.
     {
         setenv("MOLLM_METAL_W4_PREFILL_MODE", "accurate", 1);
-        struct alignas(16) Q4B8G128Block { float scales[8]; uint8_t q[4][8][16]; };
         for (int ci = 0; ci < 6 && mb.has_tensor_path(); ci++) {
             const bool quant_probe = ci == 3;
             const bool balanced_probe = ci >= 4;
@@ -2201,7 +2208,7 @@ int main() {
         memcpy(B.data, b.data(), b.size()*sizeof(float));
         // A = FULL[0:keep] along dim0 as a view (stride preserved = full0 rows).
         Tensor A = FULL;
-        A.shape[0] = keep;   // device_offset 0, strides unchanged (stride[1]=full0)
+        A.shape[0] = keep;   // device.offset 0, strides unchanged (stride[1]=full0)
         metal_op(mb, OpType::CONCAT, {&A,&B}, OUT, {0});
         int O0=keep+b0;
         std::vector<float> ref(O0*s1*s2);
@@ -2217,10 +2224,6 @@ int main() {
     // Covers GPU routing with a no-shared-expert input layout and the direct
     // selected-expert kernel used by resident W4 packages.
     if (mb.has_tensor_path()) {
-        struct alignas(16) Q4B8G128Block {
-            float scales[8];
-            uint8_t q[4][8][16];
-        };
         constexpr int H = 128;
         constexpr int I = 128;
         constexpr int E = 256;
@@ -2531,11 +2534,6 @@ int main() {
     // two's-complement nibbles. Cover both the selected decode kernel and the
     // expert-grouped prefill kernel against the CPU packed-BG32 path.
     if (mb.has_tensor_path()) {
-        struct alignas(16) Q4B8G32Block {
-            float scales[8];
-            uint8_t q[8][16];
-        };
-        static_assert(sizeof(Q4B8G32Block) == 160);
         constexpr int H = 128;
         constexpr int I = 128;
         constexpr int E = 128;

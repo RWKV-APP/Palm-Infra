@@ -42,17 +42,17 @@ if(MOLLM_SANITIZERS)
 endif()
 
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64|arm")
-    set(MOLLM_CPU_PLATFORM_SOURCE kernels/cpu_platform_arm.cpp)
+    set(MOLLM_CPU_PLATFORM_SOURCE backends/cpu/platform/arm.cpp)
 elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
     set(MOLLM_CPU_PLATFORM_SOURCE
-        kernels/cpu_platform_x86.cpp
-        kernels/matmul_x86_avx2.cpp
-        kernels/matmul_x86_avx512.cpp
-        kernels/matmul_x86_vnni.cpp
-        kernels/gdn_x86_avx512.cpp
-        kernels/attention_x86_avx512.cpp)
+        backends/cpu/platform/x86.cpp
+        kernels/cpu/x86/matmul_x86_avx2.cpp
+        kernels/cpu/x86/matmul_x86_avx512.cpp
+        kernels/cpu/x86/matmul_x86_vnni.cpp
+        kernels/cpu/x86/gdn_x86_avx512.cpp
+        kernels/cpu/x86/attention_x86_avx512.cpp)
 else()
-    set(MOLLM_CPU_PLATFORM_SOURCE kernels/cpu_platform_scalar.cpp)
+    set(MOLLM_CPU_PLATFORM_SOURCE backends/cpu/platform/scalar.cpp)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -60,47 +60,63 @@ endif()
 # ---------------------------------------------------------------------------
 
 set(SOURCES
+    # Metal-specific weight conversion is written in portable C++ so it can
+    # also be validated by the CPU-only test target.
+    backends/metal/weight_layout.cpp
+    # runtime
+    runtime/host_buffer_pool.cpp
+    runtime/threading.cpp
+    runtime/trace.cpp
+    # storage
+    storage/mapped_file.cpp
+    storage/byte_ranges.cpp
+    storage/ssd_expert_cache/provider.cpp
+    storage/ssd_expert_cache/cache.cpp
+    storage/ssd_expert_cache/io.cpp
     # graph
-    graph/buffer_pool.cpp
-    graph/mmap_file.cpp
     graph/io.cpp
-    graph/cpu_backend.cpp
+    backends/cpu/attention_ops.cpp
+    backends/cpu/backend.cpp
+    backends/cpu/host_compute.cpp
+    backends/cpu/deepseek_v4_ops.cpp
+    backends/cpu/layout_ops.cpp
+    backends/cpu/matmul_ops.cpp
+    backends/cpu/moe_ops.cpp
+    backends/cpu/normalization_ops.cpp
+    backends/cpu/recurrent_ops.cpp
+    backends/cpu/ssd_prefetch.cpp
     graph/execute.cpp
     # kernels
-    kernels/matmul.cpp
-    kernels/matmul_dense.cpp
-    kernels/matmul_pack.cpp
-    kernels/matmul_profile.cpp
-    kernels/matmul_quant.cpp
-    kernels/matmul_sparse.cpp
-    kernels/matmul_w4.cpp
-    kernels/matmul_w8.cpp
-    kernels/matmul_mxfp4.cpp
-    kernels/matmul_nvfp4.cpp
+    kernels/cpu/matmul/matmul.cpp
+    kernels/cpu/matmul/matmul_dense.cpp
+    kernels/cpu/matmul/matmul_pack.cpp
+    kernels/cpu/matmul/matmul_profile.cpp
+    kernels/cpu/matmul/matmul_quant.cpp
+    kernels/cpu/matmul/matmul_sparse.cpp
+    kernels/cpu/matmul/matmul_w4.cpp
+    kernels/cpu/matmul/matmul_w8.cpp
+    kernels/cpu/matmul/matmul_mxfp4.cpp
+    kernels/cpu/matmul/matmul_nvfp4.cpp
     ${MOLLM_CPU_PLATFORM_SOURCE}
-    kernels/elementwise.cpp
-    kernels/layout.cpp
-    kernels/norm.cpp
-    kernels/rope.cpp
-    kernels/attention.cpp
-    kernels/shortconv.cpp
-    kernels/gdn.cpp
-    kernels/gdn_decode.cpp
-    kernels/gdn_prefill.cpp
-    kernels/gated_residual.cpp
-    kernels/ple.cpp
-    kernels/deepseek_v4_attention.cpp
-    kernels/hyper_connection.cpp
-    kernels/moe.cpp
-    kernels/moe_routing.cpp
-    kernels/moe_ssd.cpp
-    kernels/moe_ssd_io.cpp
-    kernels/moe_ssd_predict.cpp
-    kernels/trace.cpp
-    kernels/rwkv.cpp
-    kernels/threading.cpp
+    kernels/cpu/elementwise.cpp
+    kernels/cpu/layout.cpp
+    kernels/cpu/norm.cpp
+    kernels/cpu/rope.cpp
+    kernels/cpu/attention.cpp
+    kernels/cpu/recurrent/shortconv.cpp
+    kernels/cpu/recurrent/gdn.cpp
+    kernels/cpu/recurrent/gdn_decode.cpp
+    kernels/cpu/recurrent/gdn_prefill.cpp
+    kernels/cpu/gated_residual.cpp
+    kernels/cpu/ple.cpp
+    kernels/cpu/models/deepseek_v4_attention.cpp
+    kernels/cpu/hyper_connection.cpp
+    kernels/cpu/moe/moe.cpp
+    kernels/cpu/moe/moe_routing.cpp
+    kernels/cpu/models/rwkv.cpp
+    # backend selection
+    backends/factory.cpp
     # engine
-    engine/byte_ranges.cpp
     engine/engine.cpp
     engine/input_prep.cpp
     engine/model_loader.cpp
@@ -113,46 +129,68 @@ set(SOURCES
 )
 
 set(PUBLIC_ENGINE_HEADERS
-    engine/accelerator_backend.h
-    engine/backend.h
     engine/engine.h
     engine/sampler.h
     engine/tokenizer.h
 )
 
-set(PUBLIC_GRAPH_HEADERS
-    graph/buffer_pool.h
-    graph/mmap_file.h
-    graph/graph.h
-    graph/execute.h
+set(PUBLIC_CORE_HEADERS
+    core/tensor.h
+    core/fp16.h
+    core/rwkv_params.h
+    core/gdn_params.h
+    core/attention_params.h
+    core/shortconv_params.h
+    core/activation.h
+    core/bf16.h
+    core/quant_layouts.h
+    core/prepared_weight.h
+    core/cache_layout.h
 )
 
-set(PUBLIC_KERNEL_HEADERS
-    kernels/cpu_platform.h
-    kernels/moe_ssd.h
-    kernels/prepared_weight.h
-    kernels/tensor.h
-    kernels/threading.h
+set(PUBLIC_RUNTIME_HEADERS
+    runtime/expert_provider.h
+    runtime/backend.h
+    runtime/accelerator_backend.h
+    runtime/threading.h
+    runtime/trace.h
+    runtime/host_buffer_pool.h
+    runtime/host_compute.h
+)
+
+set(PUBLIC_CPU_BACKEND_HEADERS
+    backends/cpu/backend.h
+    backends/cpu/platform.h
+)
+
+set(PUBLIC_STORAGE_HEADERS
+    storage/mapped_file.h
+    storage/byte_ranges.h
+)
+
+set(PUBLIC_GRAPH_HEADERS
+    graph/graph.h
+    graph/execute.h
 )
 
 add_library(mollm_lib STATIC ${SOURCES})
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         set_source_files_properties(
-            kernels/matmul_x86_avx2.cpp
+            kernels/cpu/x86/matmul_x86_avx2.cpp
             PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma;-mf16c")
         set_source_files_properties(
-            kernels/matmul_x86_avx512.cpp
+            kernels/cpu/x86/matmul_x86_avx512.cpp
             PROPERTIES COMPILE_OPTIONS "-mavx512f;-mfma;-mf16c")
         set_source_files_properties(
-            kernels/matmul_x86_vnni.cpp
+            kernels/cpu/x86/matmul_x86_vnni.cpp
             PROPERTIES COMPILE_OPTIONS
                        "-mavx512f;-mavx512bw;-mavx512vl;-mavx512vnni;-mfma")
         set_source_files_properties(
-            kernels/gdn_x86_avx512.cpp
+            kernels/cpu/x86/gdn_x86_avx512.cpp
             PROPERTIES COMPILE_OPTIONS "-mavx512f;-mfma")
         set_source_files_properties(
-            kernels/attention_x86_avx512.cpp
+            kernels/cpu/x86/attention_x86_avx512.cpp
             PROPERTIES COMPILE_OPTIONS "-mavx512f;-mfma")
     else()
         message(FATAL_ERROR
@@ -217,8 +255,8 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
 
         if(MOLLM_ARM_I8MM_COMPILES)
             add_library(mollm_arm_i8mm OBJECT
-                kernels/matmul_w4_i8mm.cpp
-                kernels/matmul_w8_i8mm.cpp)
+                kernels/cpu/arm/matmul_w4_i8mm.cpp
+                kernels/cpu/arm/matmul_w8_i8mm.cpp)
             target_include_directories(mollm_arm_i8mm PRIVATE
                 ${CMAKE_CURRENT_SOURCE_DIR}
                 ${CMAKE_CURRENT_SOURCE_DIR}/third_party/nlohmann)
@@ -291,10 +329,18 @@ if(MOLLM_METAL)
     find_library(METAL_LIBRARY Metal REQUIRED)
     find_library(FOUNDATION_LIBRARY Foundation REQUIRED)
 
-    # Compile the shader library: .metal -> .air -> default.metallib
-    set(MOLLM_METAL_SRC ${CMAKE_CURRENT_SOURCE_DIR}/kernels/metal/mollm.metal)
-    set(MOLLM_METAL_AIR ${CMAKE_CURRENT_BINARY_DIR}/mollm.air)
-    set(MOLLM_METALLIB  ${CMAKE_CURRENT_BINARY_DIR}/default.metallib)
+    # Compile each shader domain independently, then link one metallib.
+    set(MOLLM_METAL_SOURCES
+        ${CMAKE_CURRENT_SOURCE_DIR}/kernels/metal/matmul.metal
+        ${CMAKE_CURRENT_SOURCE_DIR}/kernels/metal/moe.metal
+        ${CMAKE_CURRENT_SOURCE_DIR}/kernels/metal/attention.metal
+        ${CMAKE_CURRENT_SOURCE_DIR}/kernels/metal/elementwise.metal
+        ${CMAKE_CURRENT_SOURCE_DIR}/kernels/metal/layout.metal
+        ${CMAKE_CURRENT_SOURCE_DIR}/kernels/metal/normalization.metal
+        ${CMAKE_CURRENT_SOURCE_DIR}/kernels/metal/recurrent.metal
+        ${CMAKE_CURRENT_SOURCE_DIR}/kernels/metal/rotary.metal
+        ${CMAKE_CURRENT_SOURCE_DIR}/kernels/metal/selection.metal)
+    set(MOLLM_METALLIB ${CMAKE_CURRENT_BINARY_DIR}/default.metallib)
 
     # Probe: does the toolchain support the Metal 4 tensor API (mpp::tensor_ops)?
     # If so, compile with -std=metal4.0 -DMOLLM_METAL_TENSOR so the fast
@@ -317,30 +363,72 @@ if(MOLLM_METAL)
     else()
         message(STATUS "Metal 4 tensor API not available — simdgroup GEMM only")
     endif()
-    add_custom_command(
-        OUTPUT ${MOLLM_METAL_AIR}
-        COMMAND xcrun -sdk macosx metal ${MOLLM_METAL_FLAGS} -c ${MOLLM_METAL_SRC}
-                -I ${CMAKE_CURRENT_SOURCE_DIR}/kernels/metal
-                -o ${MOLLM_METAL_AIR}
-        DEPENDS ${MOLLM_METAL_SRC}
-                ${CMAKE_CURRENT_SOURCE_DIR}/kernels/metal/metal_common.h
-        COMMENT "Compiling Metal shaders (mollm.metal -> mollm.air)"
-        VERBATIM)
+    set(MOLLM_METAL_AIR_FILES "")
+    foreach(MOLLM_METAL_SOURCE IN LISTS MOLLM_METAL_SOURCES)
+        get_filename_component(MOLLM_METAL_DOMAIN
+                               ${MOLLM_METAL_SOURCE} NAME_WE)
+        set(MOLLM_METAL_DOMAIN_AIR
+            ${CMAKE_CURRENT_BINARY_DIR}/${MOLLM_METAL_DOMAIN}.air)
+        add_custom_command(
+            OUTPUT ${MOLLM_METAL_DOMAIN_AIR}
+            COMMAND xcrun -sdk macosx metal ${MOLLM_METAL_FLAGS}
+                    -c ${MOLLM_METAL_SOURCE}
+                    -I ${CMAKE_CURRENT_SOURCE_DIR}/kernels/metal
+                    -o ${MOLLM_METAL_DOMAIN_AIR}
+            DEPENDS ${MOLLM_METAL_SOURCE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/kernels/metal/metal_common.h
+            COMMENT "Compiling Metal shader domain: ${MOLLM_METAL_DOMAIN}"
+            VERBATIM)
+        list(APPEND MOLLM_METAL_AIR_FILES ${MOLLM_METAL_DOMAIN_AIR})
+    endforeach()
     add_custom_command(
         OUTPUT ${MOLLM_METALLIB}
-        COMMAND xcrun -sdk macosx metallib ${MOLLM_METAL_AIR} -o ${MOLLM_METALLIB}
-        DEPENDS ${MOLLM_METAL_AIR}
+        COMMAND xcrun -sdk macosx metallib ${MOLLM_METAL_AIR_FILES}
+                -o ${MOLLM_METALLIB}
+        DEPENDS ${MOLLM_METAL_AIR_FILES}
         COMMENT "Linking Metal library (default.metallib)"
         VERBATIM)
     add_custom_target(mollm_metallib ALL DEPENDS ${MOLLM_METALLIB})
     add_dependencies(mollm_lib mollm_metallib)
 
     target_sources(mollm_lib PRIVATE
-        engine/metal_backend.mm
-        graph/metal_pool.mm)
+        backends/metal/attention_ops.mm
+        backends/metal/backend.mm
+        backends/metal/buffer_pool.mm
+        backends/metal/command_context.mm
+        backends/metal/elementwise_ops.mm
+        backends/metal/layout_ops.mm
+        backends/metal/lm_head.mm
+        backends/metal/matmul_ops.mm
+        backends/metal/moe_dispatch.mm
+        backends/metal/moe_host_ops.mm
+        backends/metal/moe_ops.mm
+        backends/metal/normalization_ops.mm
+        backends/metal/pipeline_cache.mm
+        backends/metal/recurrent_ops.mm
+        backends/metal/resource_store.mm
+        backends/metal/rotary_ops.mm
+        backends/metal/ssd_expert_cache.mm
+        backends/metal/ssd_shared_expert.mm)
     # The Objective-C++ sources use ARC bridge-cast ownership semantics.
     set_source_files_properties(
-        engine/metal_backend.mm graph/metal_pool.mm
+        backends/metal/attention_ops.mm
+        backends/metal/backend.mm backends/metal/buffer_pool.mm
+        backends/metal/command_context.mm
+        backends/metal/elementwise_ops.mm
+        backends/metal/layout_ops.mm
+        backends/metal/lm_head.mm
+        backends/metal/matmul_ops.mm
+        backends/metal/moe_dispatch.mm
+        backends/metal/moe_host_ops.mm
+        backends/metal/moe_ops.mm
+        backends/metal/normalization_ops.mm
+        backends/metal/pipeline_cache.mm
+        backends/metal/recurrent_ops.mm
+        backends/metal/resource_store.mm
+        backends/metal/rotary_ops.mm
+        backends/metal/ssd_expert_cache.mm
+        backends/metal/ssd_shared_expert.mm
         PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
     target_compile_definitions(mollm_lib PUBLIC
         MOLLM_METAL=1
@@ -365,12 +453,14 @@ if(MOLLM_CUDA)
     enable_language(CUDA)
     find_package(CUDAToolkit REQUIRED)
     target_sources(mollm_lib PRIVATE
-        engine/cuda_attention.cu
-        engine/cuda_backend.cu
-        engine/cuda_matmul.cu
-        engine/cuda_memory.cu
-        engine/cuda_ops.cu
-        engine/cuda_recurrent.cu)
+        backends/cuda/backend.cu
+        backends/cuda/device_runtime.cu
+        backends/cuda/dispatch.cu
+        backends/cuda/lm_head.cu
+        kernels/cuda/attention.cu
+        kernels/cuda/matmul.cu
+        kernels/cuda/elementwise.cu
+        kernels/cuda/recurrent.cu)
     target_compile_definitions(mollm_lib PUBLIC MOLLM_CUDA=1)
     target_link_libraries(mollm_lib PUBLIC CUDA::cudart CUDA::cublas)
     set_target_properties(mollm_lib PROPERTIES
@@ -451,6 +541,7 @@ if(MOLLM_BUILD_TESTS)
     add_mollm_test(test_buffer_pool   tests/test_buffer_pool.cpp)
     add_mollm_test(test_mmap_file     tests/test_mmap_file.cpp)
     add_mollm_test(test_weight_metadata tests/test_weight_metadata.cpp)
+    add_mollm_test(test_metal_weight_layout tests/test_metal_weight_layout.cpp)
     add_mollm_test(test_sampler       tests/test_sampler.cpp)
     add_executable(vision_probe       tests/vision_probe.cpp)
     target_link_libraries(vision_probe PRIVATE mollm_lib)
@@ -464,6 +555,7 @@ if(MOLLM_BUILD_TESTS)
     add_mollm_test(test_moe_routing  tests/test_moe_routing.cpp)
     add_mollm_test(test_moe           tests/test_moe.cpp)
     add_mollm_test(test_moe_ssd       tests/test_moe_ssd.cpp)
+    add_mollm_test(test_expert_provider tests/test_expert_provider.cpp)
     add_mollm_test(test_hyper_connection tests/test_hyper_connection.cpp)
     add_mollm_test(test_gated_residual tests/test_gated_residual.cpp)
     add_mollm_test(test_ple            tests/test_ple.cpp)
@@ -478,6 +570,8 @@ if(MOLLM_BUILD_TESTS)
     add_mollm_test(test_shortconv     tests/test_shortconv.cpp)
     add_mollm_test(test_gdn           tests/test_gdn.cpp)
     add_mollm_test(test_rwkv_e2e      tests/test_rwkv_e2e.cpp)
+    add_mollm_test(test_rwkv_ops      tests/test_rwkv_ops.cpp)
+    add_mollm_test(test_execution_lifecycle tests/test_execution_lifecycle.cpp)
     add_mollm_test(test_engine        tests/test_engine.cpp)
     add_mollm_test(test_tokenizer     tests/test_tokenizer.cpp)
     add_mollm_test(test_e2e           tests/test_e2e.cpp)
@@ -561,6 +655,7 @@ if(MOLLM_BUILD_TESTS)
 
     if(MOLLM_METAL)
         add_mollm_test(test_metal_ops tests/test_metal_ops.cpp)
+        set_tests_properties(test_metal_ops PROPERTIES SKIP_RETURN_CODE 77)
 
         # Developer-only microbenchmark for the decode-time Metal SSD-MoE
         # selected-expert kernel. It is intentionally not registered with
@@ -597,10 +692,18 @@ install(TARGETS mollm_lib
         INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/mollm)
 install(FILES ${PUBLIC_ENGINE_HEADERS}
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/mollm/engine)
+install(FILES ${PUBLIC_CORE_HEADERS}
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/mollm/core)
+install(FILES ${PUBLIC_RUNTIME_HEADERS}
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/mollm/runtime)
+install(FILES ${PUBLIC_CPU_BACKEND_HEADERS}
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/mollm/backends/cpu)
+install(FILES ${PUBLIC_STORAGE_HEADERS}
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/mollm/storage)
+install(FILES storage/ssd_expert_cache/cache.h
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/mollm/storage/ssd_expert_cache)
 install(FILES ${PUBLIC_GRAPH_HEADERS}
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/mollm/graph)
-install(FILES ${PUBLIC_KERNEL_HEADERS}
-        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/mollm/kernels)
 
 configure_package_config_file(
     cmake/mollmConfig.cmake.in
