@@ -153,7 +153,13 @@ int sample_token_impl(float* logits, int vocab_size, float temperature,
 
     unsigned int fallback_seed = 42;
     if (!seed) seed = &fallback_seed;
+#if defined(_WIN32)
+    // Match rand_r's per-state behavior without sharing the CRT global RNG.
+    *seed = *seed * 1103515245u + 12345u;
+    const float r = static_cast<float>((*seed / 65536u) % 32768u) / 32767.0f;
+#else
     const float r = (float)rand_r(seed) / (float)RAND_MAX;
+#endif
     const float target = r * sum;
     float cumulative = 0.0f;
     for (int i = 0; i < active; i++) {

@@ -81,7 +81,8 @@ bool generate_tokens(LLMEngine& engine, const Tokenizer& tokenizer,
                      const std::function<void(int, const std::string&)>& on_token = {},
                      bool reset_context = true,
                      const VisionEmbedding* vision = nullptr,
-                     int image_token_id = -1);
+                     int image_token_id = -1,
+                     bool ignore_text_stops = false);
 
 /// Apply Qwen3.5 ChatML template: wrap user message with special tokens.
 /// Format: <|im_start|>system\n{system}<|im_end|>\n<|im_start|>user\n{msg}<|im_end|>\n<|im_start|>assistant\n

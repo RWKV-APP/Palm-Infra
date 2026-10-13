@@ -6,6 +6,7 @@
 #include "kernels/moe_ssd.h"
 #include "kernels/trace.h"
 #include "kernels/cpu_platform.h"
+#include "platform/posix_compat.h"
 #ifdef MOLLM_METAL
 #include "engine/metal_backend.h"
 
@@ -26,9 +27,6 @@ MetalBackend* as_metal(const std::unique_ptr<Backend>& backend) {
 #include <string>
 #include <unordered_set>
 #include <vector>
-
-#include <sys/mman.h>
-#include <unistd.h>
 
 namespace {
 
@@ -131,7 +129,7 @@ void LLMEngine::clear_model_state() {
     hidden_output_copy_.clear();
 
     for (const auto& range : locked_dense_ranges_) {
-        munlock(range.first, range.second);
+        mollm_munlock(range.first, range.second);
     }
     locked_dense_ranges_.clear();
 
@@ -145,7 +143,7 @@ void LLMEngine::clear_model_state() {
     mmap_weight_exclusion_ranges_.clear();
 
     if (package_mmap_) {
-        munmap(package_mmap_, package_mmap_size_);
+        mollm_munmap(package_mmap_, package_mmap_size_);
     }
     package_mmap_ = nullptr;
     package_mmap_size_ = 0;
@@ -177,7 +175,7 @@ size_t LLMEngine::warmup_package_weights() {
     if (package_weights_resident_)
         return 0;
 
-    long page_size_long = sysconf(_SC_PAGESIZE);
+    long page_size_long = mollm_page_size();
     size_t page_size = page_size_long > 0 ? (size_t)page_size_long : 4096;
 
     const uint8_t* p = package_weights_base_;
@@ -228,7 +226,7 @@ size_t LLMEngine::lock_dense_package_weights() {
     const size_t warmed = warmup_package_weights();
     const size_t len = package_weights_size_;
     const uint8_t* base = package_weights_base_;
-    const long system_page = sysconf(_SC_PAGESIZE);
+    const long system_page = mollm_page_size();
     const size_t page_size =
         system_page > 0 ? static_cast<size_t>(system_page) : 4096;
 
@@ -268,7 +266,7 @@ size_t LLMEngine::lock_dense_package_weights() {
             (raw_end + page_size - 1) / page_size * page_size;
         const size_t bytes = aligned_end - aligned_begin;
         void* address = reinterpret_cast<void*>(aligned_begin);
-        if (mlock(address, bytes) != 0)
+        if (mollm_mlock(address, bytes) != 0)
             return false;
         locked_dense_ranges_.push_back({address, bytes});
         return true;
@@ -299,7 +297,7 @@ size_t LLMEngine::lock_dense_package_weights() {
             (void)key;
             if (buffer.empty())
                 continue;
-            if (mlock(buffer.data(), buffer.size()) != 0) {
+            if (mollm_mlock(buffer.data(), buffer.size()) != 0) {
                 complete = false;
                 break;
             }
@@ -330,7 +328,7 @@ size_t LLMEngine::lock_dense_package_weights() {
             for (auto& buffer : prepared.layouts) {
                 if (buffer.empty())
                     continue;
-                if (mlock(buffer.data(), buffer.size()) != 0) {
+                if (mollm_mlock(buffer.data(), buffer.size()) != 0) {
                     complete = false;
                     break;
                 }
@@ -344,7 +342,7 @@ size_t LLMEngine::lock_dense_package_weights() {
     if (!complete) {
         const int err = errno;
         for (const auto& range : locked_dense_ranges_)
-            munlock(range.first, range.second);
+            mollm_munlock(range.first, range.second);
         locked_dense_ranges_.clear();
         std::fprintf(stderr, "Engine: could not lock dense mmap weights: %s\n",
                      std::strerror(err));
